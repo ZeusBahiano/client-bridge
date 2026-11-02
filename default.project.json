@@ -1,0 +1,21 @@
+{
+  "name": "client-bridge",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "$className": "ReplicatedStorage",
+      "ClientBridge": { "$path": "src/ClientBridge" }
+    },
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "ClientBridge_Server": { "$path": "src/Server" }
+    },
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+      "StarterPlayerScripts": {
+        "$className": "StarterPlayerScripts",
+        "ClientBridge_Client": { "$path": "src/client-bootstrap.client.luau" }
+      }
+    }
+  }
+}
