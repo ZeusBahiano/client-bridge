@@ -134,7 +134,9 @@ If you need history after a restart, persist the stream on the consumer side
   (`--allow-insecure` overrides, for use behind a trusted proxy);
 - event payloads, tokens and `Authorization` headers are never logged;
 - known PII is already removed by the Roblox module before it sends anything;
-- WebSocket sessions require a valid opt-in token for private events.
+- WebSocket sessions require a valid opt-in token for private events;
+- the game's `optOut` cannot revoke data here: use `DELETE /sessions/{token}`
+  (which also closes live streams) or let the fixed session TTL expire.
 
 Read `../docs/09-security-privacy.md` before exposing it to the internet.
 

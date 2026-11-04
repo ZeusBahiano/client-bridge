@@ -144,8 +144,15 @@ Server-side, `ClientBridge.optIn(player)`:
 3. sends the token to that player’s client;
 4. tags subsequent player-scoped HTTP events with that token.
 
-Opting out (`ClientBridge.optOut()` / `optOut(player)`) revokes the token
-immediately. Leaving the game, or the token expiring, does the same.
+Opting out (`ClientBridge.optOut()` / `optOut(player)`) revokes the game-side
+token immediately and drops any of that session’s events still waiting in the
+HTTP queue. Leaving the game does the same.
+
+That stops **new** events. It cannot erase data that already reached a backend:
+the API’s copy of the token remains valid until its own TTL expires (24 hours
+from opt-in, by default) or until someone calls `DELETE /sessions/{token}` on
+that API. The [read contract](06-protocol-v1.md#read-contract) is how a tool or
+the player asks the backend to forget the session.
 
 The player’s token is a **bearer credential**: whoever has it can read that
 session’s events. The design assumes the player chooses to hand it to a tool.
@@ -191,7 +198,7 @@ It does three jobs:
 3. **Size control** — the event cannot exceed the configured byte budget.
 
 Declaring `events` is optional. Without it, a generic validation applies:
-flat object, at most 24 keys, strings ≤ 64 chars, finite numbers and booleans.
+flat object, at most 24 keys, strings ≤ 64 bytes, finite numbers and booleans.
 Declaring is strongly recommended for anything public.
 Full grammar: [Event schema](05-event-schema.md).
 
@@ -201,7 +208,7 @@ Even a correct schema can carry personal data. Before sending, the **Redactor**
 scans every value and key and refuses:
 
 - keys such as `username`, `email`, `phone`, `userid`, `chat`, `discord`, `ip`;
-- strings longer than 64 characters;
+- strings longer than 64 bytes;
 - strings that look like e-mail, URLs, Discord tags, IPv4, CPF or phone numbers.
 
 Blocked events are counted and audited (metadata only), never sent. Details:

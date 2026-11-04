@@ -129,7 +129,8 @@ and easy to parse. The value after `[CLIENTBRIDGE:1] ` is a complete
 1. The server called `emit`, which validated the payload.
 2. The module built an envelope `{id,type,at,scope,origin,data}`.
 3. It sent the line through the `Remote` to every client (server scope).
-4. The bootstrap LocalScript printed the line in the player's console/log.
+4. The client module (loaded by the bootstrap LocalScript) printed the line in
+   the player's console/log.
 
 That is the whole console channel. It needs nothing but Studio.
 

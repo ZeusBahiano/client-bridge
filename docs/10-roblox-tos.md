@@ -121,7 +121,7 @@ conditions that this project follows:
 | Handle failures gracefully | queue, retries, circuit breaker, never break the game |
 | Respect rate limits | 400 req/min budget by default + configurable |
 | Secrets not exposed to clients | Creator Hub secrets / server-only config |
-| Do not abuse external services | batching + backoff |
+| Do not abuse external services | batching + retry on later flushes + circuit breaker |
 
 Roblox requires games using HTTP to be able to handle failures; the module does
 so by design (events drop after retries; the game keeps running).

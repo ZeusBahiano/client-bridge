@@ -102,7 +102,7 @@ Each field maps to one of these spec forms:
 
 | Spec | Accepts | Notes |
 |---|---|---|
-| `"string"` | string, ≤ 64 characters | effective maximum; see [limits](#limits-that-always-apply) |
+| `"string"` | string, ≤ 64 bytes | effective maximum; see [limits](#limits-that-always-apply) |
 | `"string:N"` | string, ≤ N characters | N from 1 to 4096 |
 | `"number"` | finite number | integers and decimals; no NaN/∞ |
 | `"integer"` | whole number | `math.floor(v) == v` |
@@ -112,24 +112,26 @@ Each field maps to one of these spec forms:
 ### `string:N`
 
 ```lua
-name = "string:24"  -- "Glitch" (6) ok, 25 chars rejected
+name = "string:24"  -- "Glitch" (6) ok, 25 bytes rejected
 ```
 
 Rules:
 
 - the **colon** form is the only accepted one; `"string<24>"` is rejected with
   `invalid spec: string<24> (biome.name)`;
-- `N` must be an integer from 1 to 4096;
+- `N` must be a whole number from 1 to 4096 (`"string:2.5"` and
+  `"string:1e2"` are rejected);
 - whitespace around the spec is trimmed (`" string:24 "` is fine);
-- strings are measured in characters (UTF-8 bytes are what reach the wire, so
-  non-ASCII text consumes more of the 4 KB envelope budget).
+- strings are measured in **UTF-8 bytes** (`#s` in Luau), so non-ASCII text
+  consumes more than one unit per visible character and also consumes more of
+  the 4 KB envelope budget.
 
 ### Why the redactor caps at 64 anyway
 
-`Redactor` (privacy) rejects **any** string longer than 64 characters, even if
-the schema allows `string:200`. The effective maximum for a field is therefore
-`min(N, 64)`. Use `string:64` or less unless you are prepared for the redactor
-to reject longer values.
+`Redactor` (privacy) rejects **any** string longer than 64 bytes, even if the
+schema allows `string:200`. The effective maximum for a field is therefore
+`min(N, 64)` bytes. Use `string:64` or less unless you are prepared for the
+redactor to reject longer values.
 
 ### Numbers
 
@@ -184,7 +186,7 @@ If you emit a type that is not in `events`, generic validation applies:
 | payload | must be a table |
 | keys | strings only |
 | key count | at most 24 |
-| string values | at most 64 characters |
+| string values | at most 64 bytes |
 | number values | finite |
 | boolean values | allowed |
 | anything else | rejected (`unsupported type in X`) |
@@ -200,7 +202,7 @@ Regardless of schema:
 
 | Limit | Value | Enforced by |
 |---|---|---|
-| string length | 64 characters | Redactor |
+| string length | 64 bytes | Redactor |
 | declared field count | no hard limit (keep it small) | sanity |
 | undeclared key count | 24 | Schema |
 | serialized envelope | 4096 bytes (`maxEventBytes`) | Server |

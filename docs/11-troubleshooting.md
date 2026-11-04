@@ -84,7 +84,7 @@ local ok, reason = ClientBridge.emit("biome", { name = "Glitch", username = "x" 
 | `expected string` / `expected finite number` / `expected integer` / `expected boolean` | send the declared type |
 | `value not in enum` | use one of the enum keys |
 | `string too long` | respect `string:N` |
-| `text_too_long at $.x` | value over 64 chars; shorten it (redactor cap) |
+| `text_too_long at $.x` | value over 64 bytes; shorten it (redactor cap) |
 | `forbidden_field:x at $.x` | rename/remove the field; it is on the PII list |
 | `pii_email` / `pii_url` / `pii_ipv4` / `pii_cpf` / `pii_phone` / `pii_discord_tag` | remove the personal data |
 | `event_too_large` | fewer/shorter fields (4 KB envelope) |
@@ -204,7 +204,7 @@ the Python `canonical_json()` port; see
 | `403 admin_disabled` | `/events` without admin token | set `--admin-token` |
 | REST works, WS does not | using `http://` for WS | use `ws://` / `wss://` and a WebSocket client |
 | WS `426 upgrade_required` | curl/browser GET without upgrade | use a WebSocket client |
-| `replay_too_large` | `since` older than the buffer | page via REST, then connect from a recent cursor |
+| `replay_too_large` | `since` older than buffer/cap | reconnect with the error's `cursor` |
 | restart lost everything | in-memory design | expected; persist on the consumer if needed |
 
 ## WebSocket stream
@@ -230,14 +230,17 @@ custom clients must implement pong. Use the
 
 ### `replay_too_large`
 
-The requested `since` is older than `max_replay_events`. Read the REST backlog
-first, then connect with the last `next` cursor
+`since` is either older than the retained replay buffer or farther back than
+`max_replay_events`. The error message includes a `cursor`: reconnect with it to
+continue from the oldest retained event / the last event sent. The REST session
+endpoint returns **private events only**, so it cannot reconstruct a combined
+global + private cursor by itself
 ([gap-free pattern](18-streaming.md#replay-and-gap-free-consumption)).
 
 ### Events arrive twice
 
-Expected on a replay boundary: the REST page and the socket can overlap. Dedupe
-by `id` (or `seq`).
+Expected on a replay/retry boundary (the stream replays from the cursor when a
+connection is re-established). Dedupe by `id` (or `seq`).
 
 ### `name` does not control access
 

@@ -199,10 +199,17 @@ function Server.start(userConfig: any): (boolean, string?)
 
 	local httpEnabled = false
 	if state.config.transports.http and state.config.endpoint then
-		local okStart, startReason = Http.start()
-		httpEnabled = okStart
-		if not okStart then
-			Audit.record("http_disabled", { reason = startReason })
+		if not Http.isConfigured() then
+			-- configure() stored the precise reason (for example an invalid
+			-- scheme); Http.start() would only say "endpoint missing".
+			local metrics = Http.metrics()
+			Audit.record("http_disabled", { reason = metrics.lastError or "invalid_endpoint" })
+		else
+			local okStart, startReason = Http.start()
+			httpEnabled = okStart
+			if not okStart then
+				Audit.record("http_disabled", { reason = startReason })
+			end
 		end
 	end
 
@@ -222,6 +229,10 @@ function Server.start(userConfig: any): (boolean, string?)
 	end)
 
 	state.playerRemovingConnection = Players.PlayerRemoving:Connect(function(player)
+		local token = Session.get(player)
+		if token then
+			Http.dropSession(token)
+		end
 		Session.revoke(player)
 		Policy.forget(player)
 	end)
@@ -292,11 +303,13 @@ function Server.optIn(player: Player): (string?, number?)
 end
 
 function Server.optOut(player: Player)
+	local token = Session.get(player)
 	Session.revoke(player)
+	local dropped = Http.dropSession(token)
 	if state.remote then
 		state.remote:FireClient(player, { kind = "session", token = nil })
 	end
-	Audit.record("optout")
+	Audit.record("optout", { dropped = dropped })
 end
 
 function Server.isOptedIn(player: Player): boolean

@@ -64,7 +64,9 @@ Rules:
   `scope = "player"` events. It never includes another session’s events.
 - **No `since`** → live-only: the cursor starts at the current highest `seq`.
 - **`since` present** → replay from that cursor, then live. Use `0` to ask for
-  everything the in-memory buffer still has.
+  everything the in-memory buffer still has. If the cursor is older than the
+  retained window, the server sends `replay_too_large` with a `cursor` you can
+  resume from.
 - The token is validated at handshake time against the API’s in-memory session
   registry. Expired/revoked/unknown tokens get `404` and never open a socket.
 
@@ -143,14 +145,23 @@ Sent right before the server closes a socket it cannot continue:
   "v": 1,
   "kind": "error",
   "error": "replay_too_large",
-  "detail": "use GET /sessions/{token}/events to page through history",
-  "cursor": 1234
+  "detail": "history before the replay window was trimmed; reconnect with since=cursor to continue from the oldest retained event",
+  "cursor": 50
 }
 ```
 
-`replay_too_large` means `since` is older than the replay cap
-(`--max-replay-events`, default 5000). Recover by reading the REST history first
-and connecting with a recent cursor (see below).
+`replay_too_large` means one of two things:
+
+1. **history was trimmed** — `since` is older than the oldest retained event, so
+   replaying would silently skip events. `cursor` is `oldest_seq - 1`: reconnect
+   with it to continue from everything still available.
+2. **the replay cap was reached with more data left** — more than
+   `max_replay_events` (default 5000) events are pending. `cursor` is the last
+   event sent; reconnect with it to fetch the next chunk.
+
+Exactly `max_replay_events` events is **not** an error; the server replays all
+of them and continues live. The error is only sent when there is at least one
+more event to replay.
 
 ### `pong`
 
@@ -197,8 +208,9 @@ to a tool that connects later unless it replays from `since` within the buffer.
 ## Replay and gap-free consumption
 
 The replay buffer is bounded (defaults: 20,000 events and 1 hour). A cursor
-older than that gets `replay_too_large`; the REST endpoints provide the same
-window.
+older than the retained window gets `replay_too_large`; the error’s `cursor`
+tells you where to resume. The REST session endpoint uses the same buffer but
+returns **private events only** — see [Pattern B](#pattern-b--no-gaps-recommended-for-tools).
 
 ### Pattern A — live only
 
@@ -212,28 +224,41 @@ Missing events between reconnects is acceptable.
 
 ### Pattern B — no gaps (recommended for tools)
 
+The WebSocket stream is the only API that returns **global and private events
+combined**, so use it as the cursor source:
+
 ```text
-1. cursor = 0
+1. cursor = 0 (or the last seq you processed)
 2. loop:
-     GET /sessions/{token}/events?since={cursor}&limit=500
-     process events
-     cursor = response.next
-     if not response.has_more: break
-3. open /stream?token=...&since={cursor}
-4. process live events, keep updating cursor = event.seq
-5. on disconnect, repeat from step 2 (or from step 3 with the last cursor)
+     open /stream?token=...&since={cursor}
+     read hello
+     process event messages, set cursor = event.seq
+     if connection drops: reconnect with since=cursor
+     if error "replay_too_large": use error.cursor, then reconnect with it
+       (repeat if the cap error appears again while catching up)
+3. keep cursor persisted between runs
 ```
 
-The replay window covers the race between the last REST response and the socket
-handshake; events that arrived in between are replayed by `since`. Duplicates
-can still happen on the boundary (the REST page and the socket both include the
-same cursor boundary); de-duplicate by `id` or `seq`.
+The server replays everything still in the buffer after `cursor`, then switches
+to live. There is no gap between replay and live delivery: events that arrive
+during the replay are queued for the same connection.
+
+If you also want REST, remember that `GET /sessions/{token}/events` is
+**private-only**; it cannot be used alone to establish a combined cursor. Use it
+for private history and replay the public history through
+`/stream?since=…` (or the admin `/events` feed), or simply start the stream from
+`0`.
+
+Duplicates can happen on a replay/retry boundary; de-duplicate by `id` or
+`seq`.
 
 ### Cursor semantics
 
 - `seq` starts at 1 and increases for every stored event;
 - REST `since` and WebSocket `since` are **exclusive** (`seq > since`);
-- `hello.cursor` is where the stream starts.
+- `hello.cursor` is where the stream starts;
+- after a `replay_too_large` error, reconnect with the `cursor` from the error
+  message, not with 0.
 
 ## Identity: token vs username
 
@@ -348,15 +373,20 @@ milliseconds.
 | subscriber queue | 5000 events | slow consumer’s oldest events are dropped to protect ingestion |
 | frame size | 1 MiB | oversized client frame closes the connection |
 | heartbeat | 15 s | write failure cleans up the socket |
-| session lifetime | 24 h | token stops working at handshake; an open socket keeps receiving only global events |
+| session lifetime | 24 h from opt-in | token stops working at handshake; a socket opened before expiry keeps receiving global events only |
 | replay buffer | 20,000 events / 1 h | older events cannot be replayed or read |
 | process restart | — | everything is lost; clients reconnect and continue live |
 
 Common situations:
 
 - **Tool restarts** → reconnect, replay from the last `seq` it processed.
-- **Token revoked while connected** → the socket is not force-closed, but no new
-  private events are published for that token; reconnect fails handshake.
+- **`DELETE /sessions/{token}`** → the API closes every stream opened with that
+  token; the client must reconnect with a new/invalid token and gets `404`.
+- **Token expires by TTL while connected** → the socket is not force-closed, but
+  the API rejects new events for that token, so only global events continue; a
+  reconnect fails the handshake.
+- **`optOut` in the game** → stops new events and drops queued ones, but does not
+  close the backend stream; call `DELETE` for that.
 - **Backend restart** → `hello.cursor` resets; tools should treat a lower cursor
   as a new stream and continue (history is gone by design).
 - **Slow consumer** → it may miss events; it should reconnect with `since` and
@@ -389,8 +419,9 @@ Notes:
   (browsers cannot set headers on WebSocket). Redact it in proxy access logs;
   the reference API redacts it in its own logs.
 - Prefer short `session.ttlSec` for sensitive games.
-- Revoke with `optOut` or `DELETE /sessions/{token}` according to your privacy
-  policy; the player can always ask the tool to forget the token.
+- The game’s `optOut` stops new events and purges its queue, but the backend
+  copy is only erased by `DELETE /sessions/{token}` (which also closes streams)
+  or by the fixed TTL. Surface that distinction in your privacy flow.
 - The stream is read-only. There is no command channel by design.
 - Rate-limit handshakes at the proxy if you expose the stream publicly; the
   built-in limits are per-process and aimed at accidental floods.

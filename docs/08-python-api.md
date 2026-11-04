@@ -50,7 +50,8 @@ POST /clientbridge
   after `buffer_seconds` (default 3,600 s). Old events disappear; there is no
   disk.
 - **Sessions:** token → first seen, last seen, universe/place, revoked flag.
-  Expire after `session_ttl_hours` (default 24).
+  They expire `session_ttl_hours` after **first seen** (default 24 h); incoming
+  batches refresh `last_seen` but do not extend the fixed lifetime.
 - **Deduplication:** the last ~2× buffer size of event IDs is remembered, so a
   retried POST does not duplicate events.
 - **Restart:** everything is gone. Tools reconnect and continue with new
@@ -170,13 +171,21 @@ The full contract is in [Live streaming](18-streaming.md).
 curl -s 'http://127.0.0.1:8787/sessions/cb_.../events?since=0&limit=100'
 ```
 
-Returns the player’s buffered events with a `next` cursor. `404` when the token
-is unknown, expired or revoked.
+Returns the player’s **private** buffered events with a `next` cursor. Public
+(server-scope) events are not included; use the stream or the admin feed for
+those. `404` when the token is unknown, expired or revoked.
 
 ### `DELETE /sessions/{token}`
 
-Revokes the token and removes that session’s events from RAM. Used by tools
-that offer “forget my data”.
+Revokes the token, removes that session’s events from RAM and closes every live
+stream opened with it. Response:
+
+```json
+{ "ok": true, "revoked": true, "deleted_events": 41, "closed_streams": 1 }
+```
+
+Used by tools that offer “forget my data”. The game’s `optOut` is not a remote
+revoke: it only stops new events and purges its local queue.
 
 ### `GET /events` (admin)
 
@@ -337,10 +346,11 @@ cd api
 python -m unittest discover -s tests -v
 ```
 
-55 tests cover: canonical JSON + Lua signature vector, validation, auth,
-signature, replay, sessions, pagination, admin feed, rate limiting, CORS,
-oversized bodies, concurrency, WebSocket handshake, global/session delivery,
-replay, heartbeat ping/pong, unknown tokens and the in-memory store bounds.
+64 tests cover: canonical JSON + Lua signature vector, validation, auth,
+signature, replay (gap and cap), sessions, fixed TTL, pagination, admin feed,
+rate limiting, CORS, oversized bodies, concurrency, atomic mixed batches,
+WebSocket handshake, global/session delivery, revocation closing streams,
+application ping/pong, unknown tokens and the in-memory store bounds.
 
 See [Testing](15-testing.md) for the full suite and how to add cases.
 
@@ -371,7 +381,7 @@ should be additive.
 | `400 invalid_event` | shape/PII/size | read the `detail` field |
 | `404 unknown_session` on stream | token expired/revoked/unknown | opt in again |
 | `426 upgrade_required` | opened `/stream` with curl | use a WebSocket client |
-| `replay_too_large` | `since` older than the buffer | use REST pages or restart from REST cursor |
+| `replay_too_large` | `since` older than the buffer or beyond the replay cap | reconnect with the `cursor` from the error message |
 | no events in stream | game HTTP disabled or endpoint wrong | check module `metrics().http` |
 | tool sees public events but not private | token not given / wrong token | pass `?token=` |
 

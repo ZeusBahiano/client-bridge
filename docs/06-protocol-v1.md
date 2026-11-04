@@ -182,7 +182,7 @@ The module only distinguishes:
 | Response | Meaning to the module |
 |---|---|
 | `2xx` | accepted; the batch is removed from the queue |
-| anything else, timeout, DNS/SSL error | failure; retry/backoff applies |
+| anything else, timeout, DNS/SSL error | failure; retried on a later flush (no separate backoff timer) |
 
 The response **body is ignored** by the module. The reference API returns JSON
 for humans and for direct tooling, but a custom backend may return an empty
@@ -302,18 +302,25 @@ Response:
 - `next` is the cursor to pass as `since` on the next request;
 - `has_more` is `true` when the backend has more events immediately available;
 - the token itself is not echoed in the response;
+- **this endpoint returns that player’s private events only.** Public
+  (server-scope) events are not included. For a combined global + private
+  history, replay the WebSocket stream with `?token=…&since=…` (or use the
+  admin feed for global events);
 - `404` means unknown/expired/revoked token.
 
 ### `DELETE /sessions/{token}`
 
-Revokes the token and deletes that session’s buffered events:
+Revokes the token, deletes that session’s buffered events and closes its live
+streams:
 
 ```json
-{ "ok": true, "revoked": true, "deleted_events": 41 }
+{ "ok": true, "revoked": true, "deleted_events": 41, "closed_streams": 1 }
 ```
 
-The game can also revoke via `optIn`/`optOut`; this endpoint is for tools
-following the player’s request (“forget me”).
+The game-side `optOut` is **not** this endpoint: it stops new events and drops
+queued ones, but the backend copy of the token remains valid until its TTL (24 h
+from opt-in, by default) or until this `DELETE` is called. Tools/players should
+call `DELETE` when they want the backend to forget the session.
 
 ### Admin feed
 

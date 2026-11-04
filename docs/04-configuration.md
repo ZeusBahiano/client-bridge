@@ -59,9 +59,10 @@ endpoint = "https://api.example.com/clientbridge"
 - In Studio, `http://127.0.0.1[:port][/path]` and
   `http://localhost[:port][/path]` are also accepted for local testing.
 - The module does **not** append a path; use the exact URL your API expects.
-- Anything else fails validation: HTTP stays off, `audit()` records
-  `http_disabled` with `reason = "endpoint must be https (http only for
-  localhost/Studio)"`, and `start` still returns `true` (console unaffected).
+- Anything else fails validation: HTTP stays off, `metrics().http.lastError`
+  holds the precise reason (for example `endpoint must be https (http only for
+  localhost/Studio)`), `audit()` records it as `http_disabled`, and `start`
+  still returns `true` (console unaffected).
 
 ### `secretName`
 
@@ -137,7 +138,7 @@ development.
 Maximum size of one serialized envelope, in bytes. The module encodes the
 envelope and rejects it with `event_too_large` above this value. The protocol
 default is 4096 (4 KiB). Lower it if your backend has tight limits; raising it
-is rarely useful because payload strings are capped at 64 characters anyway.
+is rarely useful because payload strings are capped at 64 bytes anyway.
 
 ## Transport options
 
@@ -185,13 +186,16 @@ http = {
    the next minute (`http.lastError = "budget_exceeded"`).
 3. It builds the batch, adds `Authorization` and/or `sig`, and POSTs it.
 4. `2xx` → `http.sent += n`.
-   Non-2xx or network error → `http.failed += n`; the batch goes back to the
-   front of the queue if any event still has retries left.
+   Non-2xx or network error → `http.failed += n`. The batch is put back at the
+   front of the queue **while every event still has retries left**; once any
+   event in the batch reaches `maxRetries`, the whole batch is dropped
+   (`http.dropped += n`). There is no separate exponential delay: a retry is
+   attempted on the next flush (or when the circuit breaker closes).
 5. After 3 consecutive failed requests, a 30-second circuit breaker opens: no
    requests are attempted until it closes. This protects both sides during an
    outage.
-6. Events dropped after `maxRetries` increment `http.dropped` and produce an
-   `http_drop` audit entry.
+6. Ignore the API's `Retry-After` value — the module does not read response
+   headers. The budget, flush interval and circuit breaker are its pacing.
 
 ### Backpressure
 
@@ -212,8 +216,11 @@ session = {
 | `ttlSec` | integer ≥ 1 | `86400` | how long an opt-in token stays valid |
 
 Short TTLs are more privacy-friendly (a leaked token dies sooner); long TTLs
-are friendlier to tools that poll a player’s events across a session. Tokens
-are also revoked on opt-out and when the player leaves the game.
+are friendlier to tools that poll a player’s events across a session. The TTL
+is counted from **opt-in**, not from the last event. Opt-out and leaving the
+game revoke the game-side token and drop its queued events, but they do not
+delete data already delivered to a backend: that copy lives until its own TTL
+expires or until `DELETE /sessions/{token}` is called there.
 
 ## Recipes
 
@@ -311,9 +318,9 @@ its limits; several games fit comfortably in one instance. See
 | Situation | Module behaviour |
 |---|---|
 | `HttpService.HttpEnabled` is false | HTTP does not start; `audit()` records `http_disabled`; console keeps working |
-| Invalid endpoint | same as above |
-| Endpoint returns `401`/`403` | batch retried, then dropped; check `secretName`/`signingKey` |
-| Endpoint returns `429` | batch retried with the same backoff; API also sends `Retry-After` |
+| Invalid endpoint | same as above; the precise reason is in `metrics().http.lastError` and the audit entry |
+| Endpoint returns `401`/`403` | batch retried on later flushes, then dropped; check `secretName`/`signingKey` |
+| Endpoint returns `429` | retried on the next flush; the module ignores `Retry-After` |
 | Endpoint returns `5xx` | retried; circuit breaker after 3 consecutive failures |
 | Endpoint is down | queue grows; oldest events drop at 10,000 |
 | Server is at the request budget | flush pauses until the next minute |

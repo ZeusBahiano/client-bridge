@@ -73,7 +73,9 @@ and HTTP) and pauses HTTP flushing.
 **Opt-in** — the player’s explicit decision to create a session and share their
 player-scoped HTTP events.
 
-**Opt-out** — revoking that decision; the token dies immediately.
+**Opt-out** — withdrawing consent in the game: the game-side token is revoked,
+queued events are dropped and new sends stop. Backend data is erased only by
+`DELETE /sessions/{token}` or by the backend’s fixed TTL.
 
 **Origin** — `"server"` (trusted) or `"client"` (reported by a client, not
 trusted).

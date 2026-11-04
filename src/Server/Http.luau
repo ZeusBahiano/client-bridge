@@ -1,5 +1,6 @@
 --!strict
--- Queue + batch + budget (400/min) + backoff + circuit breaker.
+-- Queue + batch + budget (400/min) + retry + circuit breaker.
+-- Retries happen on the next flush; there is no separate delayed backoff.
 -- Auth comes from the Creator Hub secrets store.
 
 local HttpService = game:GetService("HttpService")
@@ -286,6 +287,25 @@ end
 
 function Http.clearQueue()
 	state.queue = {}
+end
+
+-- Removes queued events belonging to one session token. Called when a player
+-- opts out or leaves so nothing private is POSTed after consent is withdrawn.
+function Http.dropSession(token: string?): number
+	if type(token) ~= "string" or token == "" then
+		return 0
+	end
+	local kept = {}
+	local removed = 0
+	for _, item in ipairs(state.queue) do
+		if item.session == token then
+			removed += 1
+		else
+			table.insert(kept, item)
+		end
+	end
+	state.queue = kept
+	return removed
 end
 
 return Http

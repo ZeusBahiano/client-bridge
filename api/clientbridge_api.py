@@ -55,6 +55,7 @@ import os
 import queue
 import re
 import signal
+import socket
 import struct
 import sys
 import threading
@@ -62,7 +63,7 @@ import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from collections import deque
-from typing import Any, Deque, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import parse_qs, urlparse
 
 API_NAME = "clientbridge-api"
@@ -396,7 +397,13 @@ def verify_signature(batch: Dict[str, Any], signing_key: str) -> Tuple[bool, str
     except (ValueError, UnicodeError):
         return False, "signature_error"
     expected = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
-    if not hmac.compare_digest(signature, expected):
+    try:
+        matches = hmac.compare_digest(
+            signature.encode("utf-8"), expected.encode("ascii")
+        )
+    except UnicodeError:
+        return False, "bad_signature"
+    if not matches:
         return False, "bad_signature"
     return True, ""
 
@@ -416,7 +423,16 @@ def token_allowed(header_value: Optional[str], expected: str) -> bool:
     candidates = [header_value]
     if header_value.lower().startswith("bearer "):
         candidates.append(header_value[7:])
-    return any(hmac.compare_digest(candidate, expected_plain) for candidate in candidates)
+    # Compare bytes: compare_digest rejects non-ASCII str with TypeError, and a
+    # malformed header must be a 401, never a 500.
+    try:
+        expected_bytes = expected_plain.encode("utf-8")
+        return any(
+            hmac.compare_digest(candidate.encode("utf-8"), expected_bytes)
+            for candidate in candidates
+        )
+    except UnicodeError:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -481,7 +497,7 @@ class MemoryStore:
         if info["revoked"]:
             self._mark_dead(token)
             raise ApiError(400, "invalid_event", "session token was revoked")
-        if now - int(info["last_seen"]) > self.session_ttl_seconds:
+        if now - int(info["first_seen"]) > self.session_ttl_seconds:
             self._mark_dead(token)
             self._sessions.pop(token, None)
             self._session_events.pop(token, None)
@@ -504,7 +520,7 @@ class MemoryStore:
             raise ApiError(404, "unknown_session", "session token not found")
         if row["revoked"]:
             raise ApiError(404, "unknown_session", "session token was revoked")
-        if int(time.time()) - int(row["last_seen"]) > self.session_ttl_seconds:
+        if int(time.time()) - int(row["first_seen"]) > self.session_ttl_seconds:
             self._mark_dead(token)
             self._sessions.pop(token, None)
             self._session_events.pop(token, None)
@@ -553,7 +569,11 @@ class MemoryStore:
 
     # -- writes -------------------------------------------------------------
     def store_batch(
-        self, batch: Dict[str, Any], body_hash: str, strict_replay: bool
+        self,
+        batch: Dict[str, Any],
+        body_hash: str,
+        strict_replay: bool,
+        publish: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
     ) -> Tuple[int, int, List[Dict[str, Any]]]:
         now = int(time.time())
         stored = 0
@@ -562,6 +582,14 @@ class MemoryStore:
         touched_tokens: Set[str] = set()
 
         with self._lock:
+            # Preflight: a dead token must fail the batch before anything is
+            # mutated, otherwise a mixed batch could store half of its events
+            # and leave the store inconsistent with what the stream publishes.
+            for raw in batch["events"]:
+                token = raw.get("session")
+                if token:
+                    self._assert_token_usable(token, now)
+
             if strict_replay:
                 seen_at = self._batches.get(body_hash)
                 if seen_at is not None and now - int(seen_at) < 600:
@@ -571,7 +599,6 @@ class MemoryStore:
             for raw in batch["events"]:
                 token = raw.get("session")
                 if token:
-                    self._assert_token_usable(token, now)
                     touched_tokens.add(token)
                 if not self._remember_id(raw["id"]):
                     duplicates += 1
@@ -616,6 +643,12 @@ class MemoryStore:
                     info["universe_id"] = batch["universeId"]
                     info["place_id"] = batch["placeId"]
 
+            # Publish while still holding the ingest lock. DELETE takes the
+            # same lock, so revocation cannot interleave between "event is
+            # stored" and "event is queued to a live subscriber".
+            if new_events and publish is not None:
+                publish(new_events)
+
         return stored, duplicates, new_events
 
     def revoke_session(self, token: str) -> Dict[str, Any]:
@@ -643,6 +676,11 @@ class MemoryStore:
         with self._lock:
             return self._seq
 
+    def oldest_seq(self) -> Optional[int]:
+        """Lowest sequence number still retained, or None when empty."""
+        with self._lock:
+            return self._events[0]["seq"] if self._events else None
+
     def read_session_events(self, token: str, since: int, limit: int) -> Dict[str, Any]:
         with self._lock:
             row = self._require_session(token)
@@ -651,7 +689,7 @@ class MemoryStore:
                 for event in self._session_events.get(token, ())
                 if event["seq"] > since
             ][: limit + 1]
-            expires_at = int(row["last_seen"]) + self.session_ttl_seconds
+            expires_at = int(row["first_seen"]) + self.session_ttl_seconds
             session_info = {
                 "first_seen": now_iso(row["first_seen"]),
                 "last_seen": now_iso(row["last_seen"]),
@@ -705,7 +743,7 @@ class MemoryStore:
             active = sum(
                 1
                 for row in self._sessions.values()
-                if not row["revoked"] and int(row["last_seen"]) >= not_before
+                if not row["revoked"] and int(row["first_seen"]) >= not_before
             )
             return {"events": len(self._events), "sessions": active}
 
@@ -723,7 +761,7 @@ class MemoryStore:
             expired = [
                 token
                 for token, row in self._sessions.items()
-                if int(row["last_seen"]) < now - self.session_ttl_seconds
+                if int(row["first_seen"]) < now - self.session_ttl_seconds
             ]
             for token in expired:
                 self._mark_dead(token)
@@ -907,6 +945,20 @@ class EventBus:
             if subscriber in self._subscribers:
                 self._subscribers.remove(subscriber)
         subscriber.close()
+
+    def close_token(self, token: str) -> int:
+        """Close every stream authenticated with a revoked session token."""
+        if not token:
+            return 0
+        with self._lock:
+            targets = [
+                subscriber
+                for subscriber in self._subscribers
+                if subscriber.token == token
+            ]
+        for subscriber in targets:
+            self.unsubscribe(subscriber)
+        return len(targets)
 
     def count(self) -> int:
         with self._lock:
@@ -1150,12 +1202,14 @@ class Handler(BaseHTTPRequestHandler):
                 "Content-Type must be application/json",
             )
 
-        raw = self._read_body()
+        # Authenticate before reading the body so an unauthenticated client
+        # cannot make us buffer up to max_body_bytes.
         if not token_allowed(
             self.headers.get("Authorization"), str(self.ctx.config["auth_token"])
         ):
             raise ApiError(401, "unauthorized", "invalid or missing Authorization header")
 
+        raw = self._read_body()
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
@@ -1170,11 +1224,15 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError(401, "unauthorized", reason)
 
         body_hash = hashlib.sha256(raw).hexdigest()
-        stored, duplicates, new_events = self.ctx.store.store_batch(
-            batch, body_hash, bool(self.ctx.config["strict_replay"])
+        # Publishing happens inside the store lock (via the callback) so a
+        # concurrent DELETE cannot purge the session between "stored" and
+        # "queued to subscribers".
+        stored, duplicates, _ = self.ctx.store.store_batch(
+            batch,
+            body_hash,
+            bool(self.ctx.config["strict_replay"]),
+            publish=self.ctx.bus.publish_many,
         )
-        # Push to live WebSocket subscribers only after the commit succeeded.
-        self.ctx.bus.publish_many(new_events)
         return self._send_json(
             200,
             {
@@ -1197,8 +1255,11 @@ class Handler(BaseHTTPRequestHandler):
                 f"try again in {retry_after}s",
                 headers={"Retry-After": str(retry_after)},
             )
-        result = self.ctx.store.revoke_session(self._validate_token(parts[1]))
-        return self._send_json(200, {"ok": True, **result})
+        token = self._validate_token(parts[1])
+        result = self.ctx.store.revoke_session(token)
+        # Close any live stream authenticated with this token as well.
+        closed = self.ctx.bus.close_token(token)
+        return self._send_json(200, {"ok": True, **result, "closed_streams": closed})
 
     def _handle_session_events(self, token: str, query: Dict[str, List[str]]) -> int:
         token = self._validate_token(token)
@@ -1254,8 +1315,12 @@ class Handler(BaseHTTPRequestHandler):
         client_key = self.headers.get("Sec-WebSocket-Key")
         if not client_key:
             raise ApiError(400, "invalid_handshake", "Sec-WebSocket-Key is required")
-        if (self.headers.get("Sec-WebSocket-Version") or "13") != "13":
-            raise ApiError(400, "invalid_handshake", "only WebSocket version 13 is supported")
+        if self.headers.get("Sec-WebSocket-Version") != "13":
+            raise ApiError(
+                400,
+                "invalid_handshake",
+                "Sec-WebSocket-Version: 13 is required",
+            )
 
         token_values = query.get("token")
         token: Optional[str] = None
@@ -1289,28 +1354,83 @@ class Handler(BaseHTTPRequestHandler):
                     "heartbeatSeconds": WS_HEARTBEAT_SECONDS,
                 },
             )
+            if token and not self.ctx.store.session_valid(token):
+                # The token was revoked between the handshake validation and
+                # the subscription; do not keep a private stream alive.
+                self._ws_send_json(
+                    write_lock,
+                    {
+                        "v": PROTOCOL_VERSION,
+                        "kind": "error",
+                        "error": "unknown_session",
+                        "detail": "session token was revoked",
+                    },
+                )
+                self._ws_close(write_lock, 1008)
+                return 101
 
             if replay:
                 max_replay = int(self.ctx.config["max_replay_events"])
-                sent_replay = 0
-                while sent_replay < max_replay:
-                    rows = self.ctx.store.read_stream(cursor, token, 500)
-                    if not rows:
-                        break
-                    for event in rows:
-                        self._ws_send_text(write_lock, json.dumps(stream_event_payload(event)))
-                        cursor = event["seq"]
-                        sent_replay += 1
-                    if len(rows) < 500:
-                        break
-                if sent_replay >= max_replay:
+                oldest = self.ctx.store.oldest_seq()
+                max_seq = self.ctx.store.max_seq()
+
+                # A cursor older than the retained window would silently skip
+                # events. Report the gap and tell the client where it can
+                # resume instead of pretending nothing happened.
+                gap = False
+                resume_cursor = cursor
+                if oldest is None:
+                    if since < max_seq:
+                        gap = True
+                        resume_cursor = max_seq
+                elif since + 1 < oldest:
+                    gap = True
+                    resume_cursor = oldest - 1
+                if gap:
                     self._ws_send_json(
                         write_lock,
                         {
                             "v": PROTOCOL_VERSION,
                             "kind": "error",
                             "error": "replay_too_large",
-                            "detail": "use GET /sessions/{token}/events to page through history",
+                            "detail": (
+                                "history before the replay window was trimmed; "
+                                "reconnect with since=cursor to continue from the oldest retained event"
+                            ),
+                            "cursor": resume_cursor,
+                        },
+                    )
+                    self._ws_close(write_lock, 1013)
+                    return 101
+
+                sent_replay = 0
+                while sent_replay < max_replay:
+                    wanted = min(500, max_replay - sent_replay)
+                    rows = self.ctx.store.read_stream(cursor, token, wanted)
+                    if not rows:
+                        break
+                    for event in rows:
+                        if subscriber.closed:
+                            return 101
+                        self._ws_send_text(write_lock, json.dumps(stream_event_payload(event)))
+                        cursor = event["seq"]
+                        sent_replay += 1
+                    if len(rows) < wanted:
+                        break
+
+                # Exactly max_replay events is fine; only fail when there is
+                # at least one more event to replay.
+                if sent_replay >= max_replay and self.ctx.store.read_stream(cursor, token, 1):
+                    self._ws_send_json(
+                        write_lock,
+                        {
+                            "v": PROTOCOL_VERSION,
+                            "kind": "error",
+                            "error": "replay_too_large",
+                            "detail": (
+                                "more events than max_replay_events are available; "
+                                "reconnect with since=cursor to continue, or page REST history"
+                            ),
                             "cursor": cursor,
                         },
                     )
@@ -1335,6 +1455,10 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             self.ctx.bus.unsubscribe(subscriber)
             self.close_connection = True
+            try:
+                self.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
             try:
                 self.connection.close()
             except OSError:
@@ -1415,6 +1539,8 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             if event is None:
                 break
+            if subscriber.closed:
+                break
             if event["seq"] <= cursor:
                 continue
             cursor = event["seq"]
@@ -1425,6 +1551,10 @@ class Handler(BaseHTTPRequestHandler):
             except (OSError, ValueError):
                 break
         subscriber.closed = True
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
         try:
             self.connection.close()
         except OSError:

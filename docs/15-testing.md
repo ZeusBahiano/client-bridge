@@ -70,21 +70,21 @@ python -m unittest discover -s tests -v
 Requirements: Python 3.9+ and nothing else. The suite starts the real server as
 a subprocess on a free loopback port; no network access is required.
 
-### What it covers (55 tests)
+### What it covers (64 tests)
 
 | Area | Examples |
 |---|---|
 | Canonical JSON | Luau signature vector, escapes, non-finite rejection |
 | Config | defaults, public-bind guard, insecure opt-in |
 | HTTP ingest | valid batch, duplicates, invalid JSON, wrong version, bad types, player-without-session, server-with-session, content type, unknown endpoint, CORS, oversize |
-| Auth | raw and `Bearer` token, wrong token |
-| Signatures | valid Lua vector, tampered payload, tampered signature, missing |
-| Sessions | REST feed, cursor pagination, delete, unknown/expired token, revoked-token rejection |
+| Auth | raw and `Bearer` token, wrong token, non-ASCII header is 401 |
+| Signatures | valid Lua vector, tampered payload, tampered signature, missing, non-ASCII sig is 401 |
+| Sessions | REST feed, cursor pagination, fixed TTL, delete, unknown/expired token, revoked-token rejection, mixed-batch atomicity |
 | Admin | disabled by default, token required, all events |
 | Rate limit | 429 + `Retry-After` |
 | Concurrency | 12 threads × 8 batches |
 | Memory store | ring bound, id dedupe, strict replay, revoke purge, stream filtering, dead-token guard |
-| WebSocket | upgrade required, hello, global live events, session isolation, replay then live, unknown token, app ping/pong, health subscriber count |
+| WebSocket | upgrade required, hello, global live events, session isolation, replay gap/cap cursors, unknown token, app ping/pong, DELETE closes streams, health subscriber count |
 
 ### How the fixture works
 
@@ -111,14 +111,16 @@ Run this before a release:
 5. **Opt-in** — `studioPolicyBypass = true`, opt a test player in, capture the
    token, call `emitTo(player, "roll", …)`, confirm only that token's stream
    receives it.
-6. **Revocation** — `optOut`, confirm the token's REST feed returns `404` and a
-   new WebSocket handshake is rejected.
+6. **Revocation (two layers)** — `optOut` stops new events and drops queued
+   ones on the game side; it does *not* revoke the backend copy. Then call
+   `DELETE /sessions/{token}` and confirm the live stream closes and the REST
+   feed returns `404`.
 7. **Signature** — start the API with `--signing-key`, configure the same
    `signingKey` in Studio, confirm deliveries (and a wrong key gives `401`).
 8. **Shutdown** — Ctrl+C the API; the game keeps running (`http.queue` grows,
    then drains after restart, oldest events may drop).
-9. **Git cleanliness** — no `.db`, no logs, no secrets, no test output in the
-   repo.
+9. **Git cleanliness** — no generated databases, no logs, no secrets, no test
+   output in the repo.
 
 ## Benchmarks
 

@@ -300,7 +300,8 @@ end
 
 ### `optOut(player)`
 
-Revokes the player's token and tells their client to forget it.
+Revokes the player's token on the game side, drops that session's queued HTTP
+events and tells their client to forget the token.
 
 **Signature**
 
@@ -308,8 +309,14 @@ Revokes the player's token and tells their client to forget it.
 ClientBridge.optOut(player: Player) → ()
 ```
 
-After this, `emitTo` still produces console lines for that player, but no HTTP
-events are queued for them. A subsequent `optIn` creates a new token.
+After this, `emitTo` still produces console lines for that player, but no new
+HTTP events are queued for them and queued ones are discarded. A subsequent
+`optIn` creates a new token.
+
+> The game cannot reach into your backend. Events already delivered there stay
+> until the backend's token TTL expires (24 h by default, counted from opt-in)
+> or until `DELETE /sessions/{token}` is called on that API. Document that in
+> your player-facing privacy flow.
 
 **Example**
 
@@ -433,7 +440,7 @@ Kinds used by the module:
 | `optin` | session created |
 | `optin_blocked` | policy refused the opt-in |
 | `optin_policy_bypass` | Studio bypass used (Studio only) |
-| `optout` | session revoked |
+| `optout` | game-side token revoked; queued events dropped (`dropped`) |
 
 `Audit.clear()` exists internally for the test suite; it is not exposed on the
 facade.
@@ -644,7 +651,7 @@ the audit ring). Match on the prefix, not on the whole sentence.
 | String | Cause |
 |---|---|
 | `forbidden_field:key at $.key` | key is on the forbidden list (e.g. `username`) |
-| `text_too_long at $.path` | string longer than 64 characters |
+| `text_too_long at $.path` | string longer than 64 bytes |
 | `pii_email at $.path` | value looks like an e-mail |
 | `pii_url at $.path` | value contains a URL |
 | `pii_ipv4`, `pii_cpf`, `pii_phone`, `pii_phone_intl`, `pii_discord_tag` | matching patterns |

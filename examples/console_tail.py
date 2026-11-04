@@ -46,7 +46,12 @@ def newest_log(folder: Path) -> Optional[Path]:
     if not folder.is_dir():
         return None
     files = [path for path in folder.glob("*.log") if path.is_file()]
-    return max(files, key=lambda path: path.stat().st_mtime) if files else None
+    if not files:
+        return None
+    # Roblox client logs contain "_Player_"; prefer them over unrelated logs.
+    players = [path for path in files if "Player" in path.name]
+    candidates = players or files
+    return max(candidates, key=lambda path: path.stat().st_mtime)
 
 
 def format_event(event: dict) -> str:
@@ -56,29 +61,68 @@ def format_event(event: dict) -> str:
     return f"[{stamp}] {event.get('type', '?'):<12} ({event.get('origin', '?')}) {fields}"
 
 
-def follow(path: Path, from_start: bool, raw_json: bool) -> int:
+def _handle_line(line: str, seen: set, raw_json: bool) -> None:
+    match = LINE_RE.search(line.rstrip("\r\n"))
+    if not match:
+        return
+    try:
+        event = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return
+    event_id = str(event.get("id", ""))
+    if event_id and event_id in seen:
+        return
+    if event_id:
+        seen.add(event_id)
+    print(json.dumps(event, ensure_ascii=False) if raw_json else format_event(event), flush=True)
+
+
+def follow(path: Path, from_start: bool, raw_json: bool, fixed: bool) -> int:
     seen: set[str] = set()
-    with path.open("r", encoding="utf-8", errors="replace") as handle:
-        if not from_start:
-            handle.seek(0, os.SEEK_END)
+    handle = None
+    current: Optional[Path] = None
+    opened_before = False
+    try:
         while True:
+            candidate = path if fixed else newest_log(path.parent)
+            if candidate is None:
+                time.sleep(0.25)
+                continue
+            if handle is None or candidate != current:
+                if handle is not None:
+                    handle.close()
+                current = candidate
+                try:
+                    handle = current.open("r", encoding="utf-8", errors="replace")
+                except OSError:
+                    handle = None
+                    time.sleep(0.25)
+                    continue
+                # First open honours --from-start; a rotated file is read from
+                # the beginning so no new events are lost.
+                if from_start or opened_before:
+                    handle.seek(0)
+                else:
+                    handle.seek(0, os.SEEK_END)
+                opened_before = True
+            try:
+                size = current.stat().st_size
+                if size < handle.tell():
+                    handle.seek(0)  # file was truncated; re-read and dedupe
+            except OSError:
+                handle.close()
+                handle = None
+                current = None
+                continue
+
             line = handle.readline()
             if not line:
                 time.sleep(0.25)
                 continue
-            match = LINE_RE.search(line.rstrip("\r\n"))
-            if not match:
-                continue
-            try:
-                event = json.loads(match.group(1))
-            except json.JSONDecodeError:
-                continue
-            event_id = str(event.get("id", ""))
-            if event_id and event_id in seen:
-                continue
-            if event_id:
-                seen.add(event_id)
-            print(json.dumps(event, ensure_ascii=False) if raw_json else format_event(event), flush=True)
+            _handle_line(line, seen, raw_json)
+    finally:
+        if handle is not None:
+            handle.close()
 
 
 def main(argv=None) -> int:
@@ -99,7 +143,7 @@ def main(argv=None) -> int:
 
     print(f"tailing {path}  (Ctrl+C to stop)", file=sys.stderr)
     try:
-        return follow(path, args.from_start, args.json)
+        return follow(path, args.from_start, args.json, fixed=bool(args.log))
     except KeyboardInterrupt:
         print("\nstopped.", file=sys.stderr)
         return 0

@@ -27,11 +27,14 @@ local function parseFieldSpec(spec: any): (boolean, any)
 		if normalized == "boolean" then
 			return true, { kind = "boolean" }
 		end
-		-- "string:N" form (e.g. string:24)
+		-- "string:N" form (e.g. string:24); N must be a plain positive integer
 		if string.sub(normalized, 1, 7) == "string:" then
-			local limit = tonumber(trim(string.sub(normalized, 8)))
-			if limit and limit > 0 and limit <= 4096 then
-				return true, { kind = "string", max = limit }
+			local limitText = trim(string.sub(normalized, 8))
+			if string.match(limitText, "^%d+$") then
+				local limit = tonumber(limitText)
+				if limit and limit >= 1 and limit <= 4096 then
+					return true, { kind = "string", max = limit }
+				end
 			end
 		end
 		return false, "invalid spec: " .. normalized

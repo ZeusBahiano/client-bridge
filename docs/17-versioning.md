@@ -95,7 +95,8 @@ Its endpoints are documented in [Reference API](08-python-api.md) and
 | Module | Protocol | Reference API | Works |
 |---|---|---|---|
 | 1.0.x | 1 | 1.0.x | yes |
-| 1.0.x | 1 | any custom backend implementing v1 | yes |
+| 1.1.x | 1 | 1.0.x | yes |
+| 1.0.x / 1.1.x | 1 | any custom backend implementing v1 | yes |
 | future 2.x | 2 | 2.x | only with matching protocol |
 
 Tools: match the **protocol**, not the module version. A tool that reads

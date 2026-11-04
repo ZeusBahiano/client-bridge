@@ -156,9 +156,12 @@ data, that is a server-side/API decision, not a log-reading one.
 
 [`examples/console_tail.py`](../examples/console_tail.py) is the reference:
 
-- finds the newest log;
+- finds the newest log (preferring names containing `Player`);
 - follows it without loading the whole file;
-- handles truncation/rotation;
+- re-reads from the beginning if the file is truncated;
+- when run without `--log`, switches to the newest log after rotation (a fixed
+  `--log` path is followed, so restart the reader if that exact file is
+  replaced);
 - parses and prints `[HH:MM:SS] type (origin) key=value …`;
 - `--json` prints the raw envelope;
 - `--from-start` replays.

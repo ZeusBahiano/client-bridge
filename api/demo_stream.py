@@ -52,6 +52,7 @@ class WebSocketClient:
         # The server sends a ping every 15 s; give it two intervals before
         # treating the connection as dead.
         self.sock.settimeout(30)
+        self.closed = False
         key = base64.b64encode(os.urandom(16)).decode()
         request = (
             f"GET {path} HTTP/1.1\r\n"

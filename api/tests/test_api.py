@@ -453,6 +453,16 @@ class AuthServerTests(unittest.TestCase):
         )
         self.assertEqual(status, 401)
 
+    def test_non_ascii_secret_is_401_not_500(self):
+        status, body, _ = self.server.request(
+            "POST",
+            "/clientbridge",
+            batch([event()]),
+            headers={"Authorization": "ünïcode"},
+        )
+        self.assertEqual(status, 401)
+        self.assertEqual(body["error"], "unauthorized")
+
 
 class SignatureServerTests(unittest.TestCase):
     @classmethod
@@ -487,6 +497,13 @@ class SignatureServerTests(unittest.TestCase):
         payload["sig"] = sign(payload)[:-1] + ("A" if sign(payload)[-1] != "A" else "B")
         status, _, _ = self.server.request("POST", "/clientbridge", payload)
         self.assertEqual(status, 401)
+
+    def test_non_ascii_signature_is_401_not_500(self):
+        payload = batch([event()])
+        payload["sig"] = "não-é-base64url"
+        status, body, _ = self.server.request("POST", "/clientbridge", payload)
+        self.assertEqual(status, 401)
+        self.assertEqual(body["error"], "unauthorized")
 
 
 class AdminServerTests(unittest.TestCase):
@@ -713,11 +730,44 @@ class MemoryStoreTests(unittest.TestCase):
         store.store_batch(
             batch([event("evt_old", scope="player", session=token)]), "h8", False
         )
-        store._sessions[token]["last_seen"] -= store.session_ttl_seconds + 10
+        store._sessions[token]["first_seen"] -= store.session_ttl_seconds + 10
         with self.assertRaises(api.ApiError):
             store.store_batch(
                 batch([event("evt_new", scope="player", session=token)]), "h9", False
             )
+        self.assertFalse(store.session_valid(token))
+
+    def test_ttl_is_fixed_from_first_seen(self):
+        store = self.make_store()
+        token = "cb_" + "5" * 32
+        store.store_batch(
+            batch([event("evt_ttl", scope="player", session=token)]), "h10", False
+        )
+        # A batch refreshes last_seen, but must not extend the token lifetime.
+        store._sessions[token]["last_seen"] += 10
+        store._sessions[token]["first_seen"] -= store.session_ttl_seconds + 1
+        self.assertFalse(store.session_valid(token))
+
+    def test_mixed_batch_with_dead_token_is_atomic(self):
+        store = self.make_store()
+        token = "cb_" + "6" * 32
+        store.store_batch(
+            batch([event("evt_before", scope="player", session=token)]), "h11", False
+        )
+        store.revoke_session(token)
+        payload = batch(
+            [
+                event("evt_server_should_not_store"),
+                event("evt_dead", scope="player", session=token),
+                event("evt_server_after"),
+            ]
+        )
+        with self.assertRaises(api.ApiError) as context:
+            store.store_batch(payload, "h12", False)
+        self.assertEqual(context.exception.status, 400)
+        # Nothing from the rejected batch may be stored.
+        self.assertEqual(store.counts()["events"], 0)
+        self.assertEqual(store.read_all_events(0, 100)["events"], [])
 
     def test_stream_filtering(self):
         store = self.make_store()
@@ -817,6 +867,25 @@ class StreamTests(unittest.TestCase):
             WebSocketClient(self.server.base, token="cb_" + "f" * 32)
         self.assertIn("404", str(context.exception))
 
+    def test_version_header_is_required(self):
+        sock = socket.create_connection(("127.0.0.1", self.server.port), timeout=5)
+        try:
+            key = base64.b64encode(os.urandom(16)).decode()
+            sock.sendall(
+                (
+                    "GET /stream HTTP/1.1\r\n"
+                    f"Host: 127.0.0.1:{self.server.port}\r\n"
+                    "Upgrade: websocket\r\n"
+                    "Connection: Upgrade\r\n"
+                    f"Sec-WebSocket-Key: {key}\r\n"
+                    "\r\n"
+                ).encode("ascii")
+            )
+            status_line = sock.recv(512).decode("latin-1").split("\r\n")[0]
+            self.assertIn("400", status_line)
+        finally:
+            sock.close()
+
     def test_application_ping(self):
         client = WebSocketClient(self.server.base)
         try:
@@ -836,6 +905,84 @@ class StreamTests(unittest.TestCase):
             self.assertGreaterEqual(body["stream_subscribers"], 1)
         finally:
             client.close()
+
+    def test_delete_closes_live_stream(self):
+        token = "cb_" + "7" * 32
+        self.post([event("evt_close", scope="player", session=token)])
+        client = WebSocketClient(self.server.base, token=token)
+        try:
+            self.assertEqual(client.recv()["kind"], "hello")
+            status, body, _ = self.server.request("DELETE", f"/sessions/{token}")
+            self.assertEqual(status, 200)
+            self.assertEqual(body["closed_streams"], 1)
+            with self.assertRaises(ConnectionError):
+                client.recv(timeout=3)
+        finally:
+            client.close()
+
+
+class StreamBufferTests(unittest.TestCase):
+    """Small buffer/max-replay instance to test cursor edge cases."""
+
+    def setUp(self):
+        self.server = ServerProcess(
+            "--buffer-events", "100", "--max-replay-events", "3"
+        )
+
+    def tearDown(self):
+        self.server.close()
+
+    def post(self, events):
+        status, body, _ = self.server.request("POST", "/clientbridge", batch(events))
+        self.assertEqual(status, 200, body)
+
+    def test_gap_is_reported_with_resume_cursor(self):
+        self.post([event(f"evt_{index}") for index in range(150)])
+        client = WebSocketClient(self.server.base, since=10)
+        try:
+            self.assertEqual(client.recv()["kind"], "hello")
+            message = client.recv()
+            self.assertEqual(message["kind"], "error")
+            self.assertEqual(message["error"], "replay_too_large")
+            # The buffer keeps 51..150, so the resumable cursor is 50.
+            self.assertEqual(message["cursor"], 50)
+        finally:
+            client.close()
+
+    def test_exact_cap_does_not_error(self):
+        events = [event(f"evt_cap_{index}") for index in range(3)]
+        self.post(events)
+        client = WebSocketClient(self.server.base, since=0)
+        try:
+            self.assertEqual(client.recv()["kind"], "hello")
+            ids = [client.recv()["id"] for _ in range(3)]
+            self.assertEqual(ids, [item["id"] for item in events])
+            self.post([event("evt_cap_live")])
+            self.assertEqual(client.recv()["id"], "evt_cap_live")
+        finally:
+            client.close()
+
+    def test_cap_exceeded_can_resume_from_error_cursor(self):
+        events = [event(f"evt_more_{index}") for index in range(5)]
+        self.post(events)
+        client = WebSocketClient(self.server.base, since=0)
+        try:
+            self.assertEqual(client.recv()["kind"], "hello")
+            for index in range(3):
+                self.assertEqual(client.recv()["id"], events[index]["id"])
+            message = client.recv()
+            self.assertEqual(message["kind"], "error")
+            self.assertEqual(message["error"], "replay_too_large")
+            cursor = message["cursor"]
+        finally:
+            client.close()
+        resumed = WebSocketClient(self.server.base, since=cursor)
+        try:
+            self.assertEqual(resumed.recv()["kind"], "hello")
+            remaining = [resumed.recv()["id"] for _ in range(2)]
+            self.assertEqual(remaining, [events[3]["id"], events[4]["id"]])
+        finally:
+            resumed.close()
 
 
 class ConcurrencyTests(unittest.TestCase):

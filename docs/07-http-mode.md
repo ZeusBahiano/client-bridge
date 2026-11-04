@@ -163,6 +163,11 @@ local function onOptOutRequested(player)
 end
 ```
 
+> `optOut` stops the game from sending and drops that session's queued events.
+> It does **not** delete data already received by the backend — the tool must
+> call `DELETE /sessions/{token}` for that, or wait for the backend's fixed TTL.
+> Explain both layers to the player.
+
 ### Player UI (LocalScript)
 
 ```lua

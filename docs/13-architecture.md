@@ -18,7 +18,7 @@ How the module and the reference backend are built, and why.
 
 ```
 src/
-├── client-bootstrap.client.luau   LocalScript: loads the facade, prints lines
+├── client-bootstrap.client.luau   LocalScript: loads the client facade
 ├── ClientBridge/
 │   ├── init.luau                  facade: server or client API
 │   ├── Config.luau                defaults
@@ -41,7 +41,7 @@ api/
 ├── demo_stream.py                 WebSocket viewer (stdlib client)
 ├── benchmark.py                   HTTP load test
 ├── benchmark_stream.py            WebSocket fan-out test
-└── tests/test_api.py              55 tests
+└── tests/test_api.py              64 tests
 tests/Tests.luau                   Luau test suite
 examples/
 ├── bootstrap.server.luau          minimal server example
@@ -116,7 +116,7 @@ Properties:
 - **batch** — up to `batchSize` (100) events per POST;
 - **bounded** — 10,000 events; oldest dropped when full;
 - **budgeted** — hard request cap per minute;
-- **resilient** — retries, backoff via circuit breaker, drop-with-audit;
+- **resilient** — retries on later flushes, circuit breaker, drop-with-audit;
 - **one-way** — responses are not read; `2xx` is the entire acceptance signal.
 
 ## Sessions and policy
@@ -137,8 +137,8 @@ skip is audited.
 ## Console channel
 
 `Console.luau` builds one line: the fixed tag plus canonical JSON. The server
-never prints it; it sends it over the `Remote` to the client, and the bootstrap
-LocalScript prints it. Why:
+never prints it; it sends it over the `Remote` to the client, where
+`Client.luau` (loaded by the bootstrap LocalScript) prints it. Why:
 
 - the line lands in the **player’s** log, where tools already read;
 - a server-side `print` would go to the server output, not the player log;
@@ -206,7 +206,8 @@ Key choices:
 | Backend slow | queue grows | raise budget/scale backend |
 | Bad secret/key | repeated 401, retries then drops | fix config |
 | Player not opted in | private HTTP copy skipped | player opts in |
-| Client leaves | token revoked | new opt-in |
+| Client leaves / opts out | game token revoked and its HTTP queue purged; backend copy stays until TTL or DELETE | call `DELETE /sessions/{token}` for immediate erasure |
+| `DELETE /sessions/{token}` | backend events erased, live streams closed | new opt-in creates a new token |
 | API restart | replay buffer empty | tools reconnect, continue live |
 | API process dies | tools reconnect | supervisor restarts; no history |
 | Slow WebSocket consumer | oldest queued events dropped | reconnect with cursor |

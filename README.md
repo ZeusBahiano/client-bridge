@@ -212,7 +212,7 @@ Do not rename the folders or the `Remote` event.
 ## Test
 
 ```bash
-# backend (55 tests, no dependencies)
+# backend (64 tests, no dependencies)
 cd api && python -m unittest discover -s tests -v
 
 # benchmarks

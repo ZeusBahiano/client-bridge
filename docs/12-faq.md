@@ -59,8 +59,10 @@ Yes: `ClientBridge.start` must run on the server. A LocalScript alone cannot
 create sessions or send HTTP.
 
 **Do I need the client bootstrap?**
-For the console channel, yes — it prints the lines and delivers `onEvent`
-callbacks. Without it, server events reach the client Remote but nothing prints.
+For the console channel, yes. The bootstrap is what runs on the client and
+requires the facade; the facade’s `Client.luau` registers the Remote listener
+that prints the lines and delivers `onEvent` callbacks. Without it, server
+events reach the client Remote but nothing prints.
 
 ## HTTP channel
 
@@ -82,8 +84,11 @@ The game UI shows it after `optIn` (`ClientBridge.getSession()` on the client).
 The module never prints it to the console by default.
 
 **How long is a token valid?**
-24 hours by default (`session.ttlSec`), revocable with `optOut`/`DELETE`, and
-invalidated when the player leaves.
+The game-side token lives 24 hours by default (`session.ttlSec`) from opt-in and
+is revoked early by `optOut`, by leaving the game, or by a new opt-in. The
+backend copy expires after its own `session_ttl_hours` (also 24 h, from
+first-seen) or when `DELETE /sessions/{token}` is called; `optOut` alone does not
+erase backend data.
 
 **What if the player never opts in?**
 Server-scope events still go to HTTP (no session) and to the console. Their

@@ -73,7 +73,7 @@ Example: `{ username = "zeus" }` → `forbidden_field:username at $.username`.
 
 ### Length
 
-Any string longer than **64 characters** is rejected (`text_too_long`), even if
+Any string longer than **64 bytes** is rejected (`text_too_long`), even if
 the schema allows more. This blocks free-text dumps and chat logs.
 
 ### Types
@@ -106,14 +106,18 @@ The opt-in is per session:
 
 | Event | Effect |
 |---|---|
-| opt-in | new token (previous one revoked), 24 h default TTL |
-| opt-out | token revoked instantly; client forgets it |
-| player leaves | token revoked; policy cache cleared |
-| expiry | server rejects it; the client also sees `expiresAt` |
-| server restart | tokens are lost; players opt in again |
+| opt-in | new token (previous one revoked), 24 h TTL counted from opt-in |
+| opt-out | game-side token revoked, queued events dropped, client forgets it; backend copy untouched |
+| player leaves | game-side token revoked and queue purged; policy cache cleared |
+| backend expiry | API rejects the token 24 h after opt-in (or the backend's `session_ttl_hours`) |
+| `DELETE /sessions/{token}` | backend erases the session’s events and closes its streams |
+| server restart | game tokens are lost; backend restarts empty; players opt in again |
 
 Tools cannot list tokens or enumerate sessions. A token is only obtainable from
 the player who owns it.
+
+> The game is one-way: it cannot reach into a backend to revoke a token. Stopping
+> a stream at the API requires `DELETE /sessions/{token}` (or the fixed TTL).
 
 ## Tokens and secrets
 
@@ -133,7 +137,8 @@ Rules:
 - the session token is a bearer credential: anyone with it reads that session;
 - `signingKey` authenticates payloads but does not encrypt them — HTTPS does
   that;
-- rotate after a leak; revoke sessions with `optOut`/`DELETE`.
+- rotate after a leak; stop the game from sending with `optOut`, and erase the
+  backend copy with `DELETE /sessions/{token}`.
 
 ## The backend
 
@@ -177,9 +182,12 @@ A suggested notice (adapt to your game and jurisdiction):
 > aura rolls) to the tool server you selected. The data contains only the fields
 > listed in the game's event list; it never contains your username, user ID,
 > e-mail, chat messages, IP address or payment data. Your access code is random,
-> can be revoked at any time from the game menu, and expires after 24 hours. The
-> tool server is operated by [operator] and their privacy policy applies. If you
-> do not opt in, no per-player data leaves the game.
+> can be revoked at any time from the game menu (which stops the game from
+> sending), and expires after 24 hours. The tool server is operated by
+> [operator] and their privacy policy applies. To have the server erase data it
+> already received, use the tool's “forget me” action, which calls
+> `DELETE /sessions/{token}`. If you do not opt in, no per-player data leaves the
+> game.
 
 Give the player:
 
@@ -208,7 +216,7 @@ If a token or key leaks:
 
 | Leak | Immediate action |
 |---|---|
-| session token | `ClientBridge.optOut(player)` or `DELETE /sessions/{token}`; a new opt-in creates a new token |
+| session token | call `DELETE /sessions/{token}` on the backend (closes streams, erases events); `optOut` only stops the game from sending and purges its queue. A new opt-in creates a new token |
 | Creator Hub secret | rotate the secret in Creator Hub; the module reads it on every flush |
 | `signingKey` | deploy a new key to the backend and the game together |
 | backend admin token | restart the backend with a new value |
