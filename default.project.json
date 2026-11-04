@@ -4,7 +4,10 @@
     "$className": "DataModel",
     "ReplicatedStorage": {
       "$className": "ReplicatedStorage",
-      "ClientBridge": { "$path": "src/ClientBridge" }
+      "ClientBridge": {
+        "$path": "src/ClientBridge",
+        "Remote": { "$className": "RemoteEvent" }
+      }
     },
     "ServerScriptService": {
       "$className": "ServerScriptService",

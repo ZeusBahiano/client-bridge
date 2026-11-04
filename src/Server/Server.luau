@@ -4,6 +4,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local HttpService = game:GetService("HttpService")
+local RunService = game:GetService("RunService")
 
 local Json = require(ReplicatedStorage.ClientBridge.Shared.Json)
 local Schema = require(ReplicatedStorage.ClientBridge.Shared.Schema)
@@ -25,6 +26,8 @@ local state = {
 	specs = {} :: any,
 	remote = nil :: any,
 	heartbeat = nil :: thread?,
+	remoteConnection = nil :: RBXScriptConnection?,
+	playerRemovingConnection = nil :: RBXScriptConnection?,
 	stats = { emitted = 0, blocked = 0, console = 0, http = 0 },
 	lastError = nil :: string?,
 }
@@ -203,7 +206,7 @@ function Server.start(userConfig: any): (boolean, string?)
 		end
 	end
 
-	remote.OnServerEvent:Connect(function(player: Player, payload: any)
+	state.remoteConnection = remote.OnServerEvent:Connect(function(player: Player, payload: any)
 		if type(payload) ~= "table" then
 			return
 		end
@@ -218,7 +221,7 @@ function Server.start(userConfig: any): (boolean, string?)
 		end
 	end)
 
-	Players.PlayerRemoving:Connect(function(player)
+	state.playerRemovingConnection = Players.PlayerRemoving:Connect(function(player)
 		Session.revoke(player)
 		Policy.forget(player)
 	end)
@@ -243,6 +246,14 @@ function Server.stop()
 		task.cancel(state.heartbeat)
 		state.heartbeat = nil
 	end
+	if state.remoteConnection then
+		state.remoteConnection:Disconnect()
+		state.remoteConnection = nil
+	end
+	if state.playerRemovingConnection then
+		state.playerRemovingConnection:Disconnect()
+		state.playerRemovingConnection = nil
+	end
 	Audit.record("stop")
 end
 
@@ -258,7 +269,17 @@ function Server.optIn(player: Player): (string?, number?)
 	if not state.started then
 		return nil, nil
 	end
-	if not Policy.canUseExternalTools(player) then
+	-- A token is a bearer credential: only hand it to the player themselves.
+	-- The PolicyService gate is what makes this opt-in compliant with Roblox
+	-- external-link rules for accounts that are allowed to see external links.
+	local allowed = Policy.canUseExternalTools(player)
+	if not allowed and state.config.studioPolicyBypass and RunService:IsStudio() then
+		-- Local development only: Studio test players report no allowed
+		-- external links, which would otherwise make opt-in impossible to test.
+		allowed = true
+		Audit.record("optin_policy_bypass", { studio = true })
+	end
+	if not allowed then
 		Audit.record("optin_blocked", { reason = "policy" })
 		return nil, nil
 	end

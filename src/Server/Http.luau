@@ -19,13 +19,22 @@ local function isEndpointAllowed(url: any): boolean
 	if string.sub(url, 1, 8) == "https://" then
 		return true
 	end
-	-- local testing inside Studio only
+	-- Local testing inside Studio only. Match the host exactly so that
+	-- "http://127.0.0.1.evil.example" is not mistaken for loopback.
 	if RunService:IsStudio() then
-		if string.sub(url, 1, 16) == "http://127.0.0.1" then
-			return true
-		end
-		if string.sub(url, 1, 16) == "http://localhost" then
-			return true
+		local allowedHosts = { "http://127.0.0.1", "http://localhost" }
+		for _, base in ipairs(allowedHosts) do
+			if url == base then
+				return true
+			end
+			local prefix = base .. ":"
+			if string.sub(url, 1, #prefix) == prefix then
+				return true
+			end
+			prefix = base .. "/"
+			if string.sub(url, 1, #prefix) == prefix then
+				return true
+			end
 		end
 	end
 	return false
@@ -127,6 +136,11 @@ end
 
 function Http.flush()
 	if not state.endpoint then
+		return
+	end
+	-- Kill switch: Server.setEnabled(false) must stop outbound traffic even
+	-- though the flush loop is still alive.
+	if not state.enabled then
 		return
 	end
 	if os.clock() < state.circuitUntil then

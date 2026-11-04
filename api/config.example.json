@@ -1,0 +1,19 @@
+{
+  "host": "127.0.0.1",
+  "port": 8787,
+  "auth_token": "",
+  "admin_token": "",
+  "signing_key": "",
+  "buffer_events": 20000,
+  "buffer_seconds": 3600,
+  "session_ttl_hours": 24,
+  "rate_limit": 6000,
+  "read_rate_limit": 3000,
+  "max_body_bytes": 1048576,
+  "max_batch_events": 500,
+  "max_event_bytes": 8192,
+  "max_replay_events": 5000,
+  "strict_replay": false,
+  "allow_insecure": false,
+  "quiet": false
+}

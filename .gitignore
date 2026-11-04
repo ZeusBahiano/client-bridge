@@ -6,3 +6,11 @@ sourcemap.json
 .DS_Store
 Thumbs.db
 .vscode/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.log
+.env
+api/data/
+api/*.db

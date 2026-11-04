@@ -8,7 +8,9 @@ return {
 	signingKey = nil,
 	events = nil,
 	allowClientOrigin = true,
-	consoleRequiresOptIn = false,
+	-- Studio-only escape hatch so you can test the opt-in/HTTP flow locally.
+	-- Ignored outside Studio. Never turn this on for a published experience.
+	studioPolicyBypass = false,
 	maxEventBytes = 4096,
 	http = {
 		batchSize = 100,

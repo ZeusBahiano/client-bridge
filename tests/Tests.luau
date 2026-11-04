@@ -162,7 +162,44 @@ local function run(): { any }
 		eq(Http.metrics().queue, 0, "queue cleared")
 	end)
 
+	check("schema_enum_and_integer", function()
+		local ok, compiled, err = Schema.compile({
+			roll = {
+				scope = "player",
+				data = { aura = "string:32", rarity = "integer", tier = { Common = true, Rare = true } },
+			},
+		})
+		truthy(ok, "compile: " .. tostring(err))
+		truthy(Schema.validateEvent("roll", { aura = "Cosmic", rarity = 5, tier = "Rare" }, compiled), "valid")
+		truthy(not Schema.validateEvent("roll", { aura = "Cosmic", rarity = 5.5, tier = "Rare" }, compiled), "float integer")
+		truthy(not Schema.validateEvent("roll", { aura = "Cosmic", rarity = 5, tier = "Mythic" }, compiled), "enum")
+		truthy(not Schema.validateEvent("roll", { aura = string.rep("a", 33), rarity = 5, tier = "Rare" }, compiled), "string limit")
+	end)
+
+	check("schema_errors", function()
+		local ok, _, err = Schema.compile({ ["Bad Type!"] = { data = {} } })
+		truthy(not ok, "bad type name")
+		truthy(err ~= nil, "error message")
+		ok = Schema.compile({ ["ok"] = { data = { name = "string<24>" } } })
+		truthy(not ok, "old angle-bracket syntax must be rejected")
+	end)
+
+	check("redactor_url_and_phone", function()
+		truthy(not Redactor.check({ link = "join https://evil.example now" }), "url")
+		truthy(not Redactor.check({ contact = "+55 98765432" }), "phone")
+		truthy(not Redactor.check({ id = "123.456.789-00" }), "cpf")
+	end)
+
+	check("json_numbers", function()
+		eq(Json.encode({ n = 1.5 }), '{"n":1.5}', "float")
+		eq(Json.encode({ n = 300 }), '{"n":300}', "int")
+		truthy(not pcall(Json.encode, { [1] = "x", a = 2 }), "mixed table must error")
+	end)
+
 	check("server_cycle", function()
+		Server.stop() -- make the test independent from whatever started earlier
+		Http.clearQueue()
+		Audit.clear()
 		local ok, err = Server.start({
 			events = {
 				biome = { scope = "server", data = { name = "string:24" } },

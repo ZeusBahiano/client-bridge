@@ -1,0 +1,13 @@
+services:
+  clientbridge-api:
+    build: .
+    ports:
+      - "8787:8787"
+    environment:
+      CLIENTBRIDGE_HOST: "0.0.0.0"
+      # Set these in a .env file next to this compose file.
+      CLIENTBRIDGE_AUTH_TOKEN: "${CLIENTBRIDGE_AUTH_TOKEN:-}"
+      CLIENTBRIDGE_ADMIN_TOKEN: "${CLIENTBRIDGE_ADMIN_TOKEN:-}"
+      CLIENTBRIDGE_SIGNING_KEY: "${CLIENTBRIDGE_SIGNING_KEY:-}"
+    restart: unless-stopped
+    # No volume on purpose: events are held in memory only.
